@@ -1,0 +1,33 @@
+{
+  "name": "sports-larp",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "ingest": "node --env-file-if-exists=.env --experimental-strip-types --disable-warning=ExperimentalWarning server/main.ts",
+    "ingest:watch": "node --env-file-if-exists=.env --experimental-strip-types --disable-warning=ExperimentalWarning server/main.ts --watch",
+    "parity": "node --experimental-strip-types --disable-warning=ExperimentalWarning server/parity.ts",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test \"server/**/*.test.ts\"",
+    "api": "node --env-file-if-exists=.env --experimental-strip-types --disable-warning=ExperimentalWarning --watch server/api.ts",
+    "start": "node --env-file-if-exists=.env --experimental-strip-types --disable-warning=ExperimentalWarning server/api.ts",
+    "refit": "node --env-file-if-exists=.env --experimental-strip-types --disable-warning=ExperimentalWarning server/main.ts --refit"
+  },
+  "dependencies": {
+    "hyparquet": "1.31.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "oxlint": "^1.81.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  }
+}
