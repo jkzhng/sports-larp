@@ -28,7 +28,7 @@ venv/
 .env
 .env.*
 !.env.example
-.CLAUDE.md
+CLAUDE.md
 
 # Downloaded data
 .data/
