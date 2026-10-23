@@ -34,7 +34,7 @@ export function RevealPanel({ gameId }: { gameId: string }) {
         <span className={winner === 'home' ? 'won' : ''}>
           {home.score} {home.abbr}
         </span>
-        <span className="final-label">Final{data.overtime ? ' (OT)' : ''}</span>
+        <span className="final-label">Final{data.overtimes > 0 ? ` (${quarterLabel(4 + data.overtimes)})` : ''}</span>
       </p>
 
       {data.talkingPoints.length > 0 && (

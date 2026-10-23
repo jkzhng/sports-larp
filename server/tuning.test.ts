@@ -34,7 +34,7 @@ function ratingsFor(taste: Weights, n: number, seed: number, noise = 0): RatedGa
 }
 
 test('the fit recovers which signals a rater cares about', () => {
-  const w = fitWeights(ratingsFor(ACTION_FAN, 200, 1))!
+  const w = fitWeights(ratingsFor(ACTION_FAN, 200, 1), SIGNALS)!
   assert.ok(Math.abs(SIGNALS.reduce((a, s) => a + w[s], 0) - 1) < 1e-9, 'weights sum to 1')
   assert.ok(SIGNALS.every((s) => w[s] >= 0), 'weights are non-negative')
   assert.ok(w.explosive > 0.45 && w.explosive < 0.75, `explosive ${w.explosive}`)
@@ -44,7 +44,7 @@ test('the fit recovers which signals a rater cares about', () => {
 
 test('the fit gives up when ratings ignore every signal', () => {
   const flat = ratingsFor(ACTION_FAN, 30, 2).map((r) => ({ ...r, stars: 3 }))
-  assert.equal(fitWeights(flat), null)
+  assert.equal(fitWeights(flat, SIGNALS), null)
 })
 
 test('concordance counts correctly ordered pairs', () => {
@@ -69,9 +69,9 @@ test('recalibrated cutoffs keep about 3 Must watch games a week', () => {
   const rand = rng(4)
   const reference: ReferenceGame[] = []
   for (let week = 1; week <= 18; week++) {
-    for (let g = 0; g < 16; g++) reference.push({ season: 2025, week, regular: true, pct: randomPct(rand), bigMoment: false })
+    for (let g = 0; g < 16; g++) reference.push({ week: `2025-${week}`, regular: true, pct: randomPct(rand), bigMoment: false })
   }
-  const cutoffs = calibrateCutoffs(reference, ACTION_FAN, DEFAULT_MODEL)
+  const cutoffs = calibrateCutoffs(reference, ACTION_FAN, DEFAULT_MODEL, 3)
   const must = cutoffs[0][0]
   const perWeek = reference.filter((g) => weightedTotal(g.pct, false, ACTION_FAN) >= must).length / 18
   assert.ok(perWeek > 2.7 && perWeek < 3.3, `${perWeek} per week`)

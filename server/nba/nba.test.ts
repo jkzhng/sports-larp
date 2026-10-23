@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
-import { openDb, upsertNbaGames, upsertScores } from '../db.ts'
+import { activateWeightSet, activeWeightSet, openDb, upsertNbaGames, upsertRating, upsertScores } from '../db.ts'
 import { listNbaGames, listNights, revealGame } from '../queries.ts'
-import { scoreGames, type RawSignals } from '../scoring/score.ts'
+import { NBA_REFIT, refitWeights } from '../refit.ts'
+import { DEFAULT_MODEL, scoreGames, type RawSignals } from '../scoring/score.ts'
 import type { NbaGame, Summary } from '../sources/espn.ts'
 import { matchNbaHighlights, parseNbaHighlightTitle } from './highlights.ts'
 import { nbaTags } from './ingest.ts'
-import { NBA_MODEL, type NbaSignal } from './model.ts'
+import { NBA_MODEL, SIGNALS, WEIGHTS, type NbaSignal } from './model.ts'
 import { buildNbaRecap } from './recap.ts'
 import { nbaGameSignals } from './signals.ts'
 import { computeNbaStakes } from './stakes.ts'
@@ -144,7 +148,7 @@ test('the NBA list API never carries scores, and reveal does', () => {
 
   const body = listNbaGames(db, '2026-10-21', new Date('2026-10-22T06:00:00Z'))!
   const text = JSON.stringify(body)
-  for (const key of ['score', 'result', 'total', 'winner', 'pct', 'signals', 'raw', 'overtime']) {
+  for (const key of ['score', 'result', 'total', 'winner', 'pct', 'signals', 'raw', 'overtime', 'stars']) {
     assert.ok(!new RegExp(`"\\w*${key}\\w*"\\s*:`, 'i').test(text), `response has a "${key}" field`)
   }
   assert.ok(!text.includes('103') && !text.includes('102'), 'response contains a final score')
@@ -161,4 +165,90 @@ test('the NBA list API never carries scores, and reveal does', () => {
   assert.equal(reveal.home.score, 103)
   assert.equal(reveal.why?.contributions.find((c) => c.key === 'star')?.label, 'Star performance')
   assert.equal(reveal.winProbability.periodSeconds, 720)
+})
+
+test('overtime counts every period: a double-overtime game is 2', () => {
+  const r = buildNbaRecap(summary([
+    [1, '12:00', 'Jumpball', 'Jump ball', 0, 0, 0.5],
+    [5, '2:00', 'Jump Shot', 'Jalen Brunson makes 18-foot jumper', 110, 108, 0.6, made],
+    [6, '0:00.0', 'End Game', 'End of Game', 120, 118, 0],
+  ]), 'BOS', 'NY')!
+  assert.equal(r.overtime, 2)
+  assert.equal(r.wp.at(-1)![0], 2880 + 600)
+})
+
+test('schema 5 turns the old overtime flag into a period count', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sports-larp-'))
+  const path = join(dir, 'old.db')
+  try {
+    const old = openDb(path)
+    upsertNbaGames(old, [
+      game({ game_id: 'OT2', completed: true, home_score: 120, away_score: 118 }),
+      game({ game_id: 'OT1', completed: true, home_score: 110, away_score: 108 }),
+    ], new Map())
+    // As schema 4 stored them: a 0/1 flag.
+    old.prepare("update recaps set overtime = 1, wp_series = ? where game_id = 'OT2'").run('[[0,0.5],[3480,0]]')
+    old.prepare("update recaps set overtime = 1, wp_series = ? where game_id = 'OT1'").run('[[0,0.5],[3180,1]]')
+    old.exec('pragma user_version = 4')
+    old.close()
+    const db = openDb(path)
+    const ot = (id: string) => (db.prepare('select overtime from recaps where game_id = ?').get(id) as { overtime: number }).overtime
+    assert.equal(ot('OT2'), 2)
+    assert.equal(ot('OT1'), 1)
+    assert.equal(revealGame(db, 'OT2')!.overtimes, 2)
+    db.close()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('NBA ratings personalize NBA weights and leave the NFL set alone', () => {
+  const db = openDb(':memory:')
+  // Deterministic pseudo-random percentiles.
+  let seed = 11
+  const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646
+  const games: NbaGame[] = []
+  const scores: ReturnType<typeof scoreGames<NbaSignal>> = []
+  const add = (id: string, season: number, night: string, pct: Record<NbaSignal, number>) => {
+    games.push(game({ game_id: id, season, night, tipoff: `${night}T23:30Z`, completed: true, home_score: 100, away_score: 90 }))
+    scores.push({ game_id: id, model_version: NBA_MODEL.version, total: 50, stars: 3, tier: 'Worth it', raw: { ...pct, big_moment: false }, pct })
+  }
+  const randomPct = () => Object.fromEntries(SIGNALS.map((s) => [s, rand()])) as Record<NbaSignal, number>
+  // 20 reference weeks of 50 games each.
+  for (let i = 0; i < 1000; i++) {
+    const day = new Date(Date.UTC(2025, 10, 3) + Math.floor(i / 7) * 86_400_000).toISOString().slice(0, 10)
+    add(`REF_${i}`, 2025, day, randomPct())
+  }
+  // A rater who only cares about highlight plays and stars.
+  const ratings = Array.from({ length: 40 }, () => randomPct())
+  ratings.forEach((pct, i) => add(`RATED_${i}`, 2026, '2026-10-21', pct))
+  upsertNbaGames(db, games, new Map())
+  upsertScores(db, scores, '2026-10-22T00:00:00Z')
+  ratings.forEach((pct, i) => {
+    const stars = Math.min(5, Math.max(1, Math.round(1 + 4 * (0.6 * pct.highlight_plays + 0.4 * pct.star))))
+    upsertRating(db, `RATED_${i}`, stars, new Date(Date.UTC(2026, 9, 22) + i * 3_600_000).toISOString(), NBA_MODEL.version)
+  })
+  const nflSet = { ...DEFAULT_MODEL, version: `${DEFAULT_MODEL.version}+w1`, ratingsUsed: 20, fittedShare: 0.5, createdAt: '2026-10-01T00:00:00Z' }
+  activateWeightSet(db, nflSet, null)
+
+  const result = refitWeights(db, new Date('2026-10-24T00:00:00Z'), { referenceSeasons: [2025], league: NBA_REFIT })
+  assert.equal(result.status, 'adopted')
+  const active = activeWeightSet(db, NBA_MODEL)
+  assert.equal(active.version, 'nba-v0.1+w1')
+  assert.ok(active.weights.highlight_plays > WEIGHTS.highlight_plays && active.weights.star > WEIGHTS.star)
+  assert.ok(active.weights.late_closeness < WEIGHTS.late_closeness)
+  // Must watch keeps about 2.5 regular-season games a week under the new weights.
+  const must = active.cutoffs[0][0]
+  const refScores = scores.filter((s) => s.game_id.startsWith('REF_')).map((s) => 100 * SIGNALS.reduce((a, k) => a + active.weights[k] * s.pct[k], 0))
+  const perWeek = refScores.filter((x) => x >= must).length / (1000 / 7 / 7)
+  assert.ok(perWeek > 2.2 && perWeek < 2.8, `${perWeek} per week`)
+  assert.equal(activeWeightSet(db, DEFAULT_MODEL).version, nflSet.version, 'the NFL set stays active')
+  // The NFL refit is a separate schedule and sees no NFL ratings.
+  assert.equal(refitWeights(db, new Date('2026-10-24T00:00:00Z'), { referenceSeasons: [2025] }).status, 'skipped')
+
+  upsertScores(db, scoreGames(new Map(scores.map((s) => [s.game_id, s.raw])), scores.map((s) => s.raw), active), '2026-10-24T00:00:00Z')
+  const nights = listNights(db, 2026, new Date('2026-10-24T00:00:00Z'))
+  assert.equal(nights.model.personalized, true)
+  assert.equal(nights.model.ratingsUsed, 40)
+  assert.equal(listNbaGames(db, '2026-10-21', new Date('2026-10-24T00:00:00Z'))!.games.filter((g) => g.state === 'ranked').length, 40)
 })

@@ -67,7 +67,7 @@ Other ingest options:
 | Command | What it does |
 | --- | --- |
 | `npm run ingest -- --force` | Re-download everything and re-score all games |
-| `npm run refit` | Refit the NFL weights from your ratings now, instead of waiting for the weekly refit |
+| `npm run refit` | Refit the weights from your ratings now, instead of waiting for the weekly refit. Each league learns from its own ratings, starting at 20 |
 
 All data lives in `data/` (gitignored), including your ratings. To start over, delete `data/sports-larp.db` and ingest again. That also deletes your ratings. The NBA's cached downloads in `data/raw/espn_nba/` are reused, so only the NFL is downloaded again.
 

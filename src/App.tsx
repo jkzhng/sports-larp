@@ -15,6 +15,7 @@ import {
 } from './api.ts'
 import { GameCard } from './components/GameCard.tsx'
 import { PeriodNav, type Period } from './components/PeriodNav.tsx'
+import { UpdateButton } from './components/UpdateButton.tsx'
 import { readJson, writeJson } from './storage.ts'
 import './App.css'
 
@@ -73,8 +74,7 @@ function fromNights(n: NightsResponse): Nav {
   }
 }
 
-function modelStatus(league: League, m: ModelInfo): string {
-  if (league === 'NBA') return `Rate games you watch: ${m.ratings} so far`
+function modelStatus(m: ModelInfo): string {
   if (m.personalized) return `Personalized from ${m.ratingsUsed} of your ratings`
   if (m.ratings >= m.ratingsNeeded) return `${m.ratings} ratings in; personalizing on the next refit`
   return `Rate games you watch: ${m.ratings} of ${m.ratingsNeeded} to personalize`
@@ -98,6 +98,7 @@ function App() {
   const [revealed, setRevealed] = useState<string[]>(() => readJson('revealed', []))
   const [shieldOn, setShieldOn] = useState<boolean>(() => readJson('shield', false))
   const [shieldLifted, setShieldLifted] = useState(false)
+  const [refreshes, setRefreshes] = useState(0) // bumped after an update to reload everything
 
   useEffect(() => {
     // `?season=2025` browses a past season; the default is the current one.
@@ -108,13 +109,14 @@ function App() {
       .then((n) => {
         if (stale) return
         setNav(n)
-        setPeriod(n.defaultKey)
+        // After an update, stay on the week or night being viewed.
+        setPeriod((p) => (p !== null && n.periods.some((x) => x.key === p) ? p : n.defaultKey))
       })
       .catch((e: Error) => !stale && setError(e.message))
     return () => {
       stale = true
     }
-  }, [league])
+  }, [league, refreshes])
 
   useEffect(() => {
     if (!nav || period === null || nav.league !== league) return
@@ -151,6 +153,8 @@ function App() {
     setError(null)
     setShowSkippable(false)
   }
+
+  const refresh = useCallback(() => setRefreshes((n) => n + 1), [])
 
   const watch = useCallback((g: Game) => markWatched(g.id), [markWatched])
 
@@ -215,9 +219,12 @@ function App() {
           <h1>Sports LARP</h1>
           <p className="tagline">The best games to watch, no spoilers.</p>
         </div>
-        <button type="button" className={`shield-toggle ${shieldOn ? 'on' : ''}`} onClick={toggleShield} aria-pressed={shieldOn}>
-          Spoiler shield {shieldOn ? 'on' : 'off'}
-        </button>
+        <div className="masthead-actions">
+          <UpdateButton league={league} onUpdated={refresh} />
+          <button type="button" className={`shield-toggle ${shieldOn ? 'on' : ''}`} onClick={toggleShield} aria-pressed={shieldOn}>
+            Spoiler shield {shieldOn ? 'on' : 'off'}
+          </button>
+        </div>
       </header>
 
       <div className="league-switch" role="tablist" aria-label="League">
@@ -241,7 +248,7 @@ function App() {
           {ranked.length > 0 && (
             <p className="summary">
               {ranked.length} {ranked.length === 1 ? 'game' : 'games'} ranked · {mustCount} must watch
-              {nav && <span className="model-status"> · {modelStatus(league, nav.model)}</span>}
+              {nav && <span className="model-status"> · {modelStatus(nav.model)}</span>}
             </p>
           )}
 

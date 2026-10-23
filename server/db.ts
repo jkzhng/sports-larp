@@ -5,7 +5,7 @@ import { DB_PATH } from './config.ts'
 import type { HighlightCandidateGame, Upload } from './highlights.ts'
 import type { NbaHighlightCandidate } from './nba/highlights.ts'
 import type { Recap } from './recap.ts'
-import type { TierCutoffs, Weights } from './scoring/model.ts'
+import type { SignalName, TierCutoffs } from './scoring/model.ts'
 import type { RawSignals, ScoringModel, WatchScore } from './scoring/score.ts'
 import type { Stakes } from './scoring/stakes.ts'
 import type { NbaGame } from './sources/espn.ts'
@@ -89,7 +89,7 @@ create table if not exists recaps (
   game_id         text primary key,
   home_score      integer not null,
   away_score      integer not null,
-  overtime        integer not null default 0,
+  overtime        integer not null default 0, -- overtime periods played: 0, 1 (OT), 2 (2OT), ...
   key_moments     text not null default '[]', -- JSON: KeyMoment[]
   talking_points  text not null default '[]', -- JSON: string[]
   wp_series       text not null default '[]', -- JSON: [elapsedSeconds, homeWp][]
@@ -142,7 +142,7 @@ create table if not exists weight_sets (
 // them). Changed columns on a derived table also need a step below that drops
 // it and forgets upstream state, so the next ingest rebuilds it from nflverse.
 // Never drop `ratings` or `weight_sets`: they can't be rebuilt.
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 
 function migrate(db: DatabaseSync): void {
   const { user_version: version } = db.prepare('pragma user_version').get() as { user_version: number }
@@ -152,15 +152,36 @@ function migrate(db: DatabaseSync): void {
     console.log(`database schema ${version} -> ${SCHEMA_VERSION}: plays and recaps will be rebuilt on the next ingest`)
   }
   if (version > 0 && version < 4) db.exec('alter table games add column night text')
+  if (version > 0 && version < 5) countOvertimes(db)
   db.exec(SCHEMA)
   db.exec('create index if not exists games_night on games (league, season, night)')
   db.exec(`pragma user_version = ${SCHEMA_VERSION}`)
+}
+
+/**
+ * Schema 5: `recaps.overtime` holds the number of overtime periods instead of
+ * a 0/1 flag. NFL counts come from the stored plays; NBA ones from where the
+ * win-probability series ends (regulation is 48 minutes, each OT 5).
+ */
+function countOvertimes(db: DatabaseSync): void {
+  db.exec(`
+    update recaps set overtime = (select max(qtr) - 4 from plays p where p.game_id = recaps.game_id)
+    where overtime = 1 and exists (select 1 from plays p where p.game_id = recaps.game_id and p.qtr > 5)`)
+  const nba = db
+    .prepare(`select r.game_id, r.wp_series from recaps r join games g on g.id = r.game_id where g.league = 'NBA' and r.overtime = 1`)
+    .all() as { game_id: string; wp_series: string }[]
+  const stmt = db.prepare('update recaps set overtime = ? where game_id = ?')
+  for (const r of nba) {
+    const end = (JSON.parse(r.wp_series) as [number, number][]).at(-1)?.[0] ?? 0
+    if (end > 2880) stmt.run(Math.ceil((end - 2880) / 300), r.game_id)
+  }
 }
 
 export function openDb(path = DB_PATH): DatabaseSync {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
   const db = new DatabaseSync(path)
   db.exec('pragma journal_mode = wal')
+  db.exec('pragma busy_timeout = 5000') // the API writes ratings while an ingest child may be writing
   db.exec('create table if not exists source_state (key text primary key, value text not null)')
   // Databases made before versioning report 0 but already have tables.
   const hasTables = db.prepare("select 1 from sqlite_master where name = 'plays'").get() !== undefined
@@ -293,7 +314,7 @@ export function upsertRecaps(db: DatabaseSync, recaps: Map<string, Recap>, built
     where game_id = ?`)
   transaction(db, () => {
     for (const [gameId, r] of recaps) {
-      stmt.run(+r.overtime, JSON.stringify(r.keyMoments), JSON.stringify(r.talkingPoints), JSON.stringify(r.wp), builtAt, gameId)
+      stmt.run(r.overtime, JSON.stringify(r.keyMoments), JSON.stringify(r.talkingPoints), JSON.stringify(r.wp), builtAt, gameId)
     }
   })
 }
@@ -388,8 +409,11 @@ export function ratingCount(db: DatabaseSync, league = 'NFL'): number {
   ).n
 }
 
-/** Ratings with each game's signal percentiles (weight-independent), oldest first. */
-export function ratedGames(db: DatabaseSync, baseVersion: string): RatedGame[] {
+/**
+ * Ratings with each game's signal percentiles (weight-independent), oldest
+ * first. The model version picks the league: NBA games have no nfl-* scores.
+ */
+export function ratedGames<S extends string = SignalName>(db: DatabaseSync, baseVersion: string): RatedGame<S>[] {
   const rows = db
     .prepare(
       `select r.stars, w.signals from ratings r
@@ -398,27 +422,35 @@ export function ratedGames(db: DatabaseSync, baseVersion: string): RatedGame[] {
     )
     .all(baseVersion) as { stars: number; signals: string }[]
   return rows.map((r) => {
-    const { raw, pct } = JSON.parse(r.signals) as { raw: { big_moment: boolean }; pct: RatedGame['pct'] }
+    const { raw, pct } = JSON.parse(r.signals) as { raw: { big_moment: boolean }; pct: RatedGame<S>['pct'] }
     return { stars: r.stars, pct, bigMoment: raw.big_moment }
   })
 }
 
-/** Reference-season games with percentiles, for calibrating tier cutoffs. */
-export function referenceGames(db: DatabaseSync, baseVersion: string, seasons: number[]): ReferenceGame[] {
+/** Monday of a night's week (YYYY-MM-DD), as the notebook's `week_of`. */
+export function weekOf(night: string): string {
+  const d = new Date(`${night}T12:00:00Z`)
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7))
+  return d.toISOString().slice(0, 10)
+}
+
+/** Reference-season games with percentiles, for calibrating tier cutoffs. NBA games are grouped into weeks by night. */
+export function referenceGames<S extends string = SignalName>(db: DatabaseSync, baseVersion: string, seasons: number[]): ReferenceGame<S>[] {
   const rows = db
     .prepare(
-      `select g.season, g.week, g.game_type, w.signals from watch_scores w
+      `select g.season, g.week, g.night, g.game_type, w.signals from watch_scores w
        join games g on g.id = w.game_id
        where w.model_version = ? and g.season in (${seasons.map(() => '?').join(', ')})`,
     )
-    .all(baseVersion, ...seasons) as { season: number; week: number; game_type: string; signals: string }[]
+    .all(baseVersion, ...seasons) as { season: number; week: number; night: string | null; game_type: string; signals: string }[]
   return rows.map((r) => {
-    const { raw, pct } = JSON.parse(r.signals) as { raw: { big_moment: boolean }; pct: ReferenceGame['pct'] }
-    return { season: r.season, week: r.week, regular: r.game_type === 'REG', pct, bigMoment: raw.big_moment }
+    const { raw, pct } = JSON.parse(r.signals) as { raw: { big_moment: boolean }; pct: ReferenceGame<S>['pct'] }
+    const week = r.night ? weekOf(r.night) : `${r.season}-${r.week}`
+    return { week, regular: r.game_type === 'REG', pct, bigMoment: raw.big_moment }
   })
 }
 
-export interface WeightSet extends ScoringModel {
+export interface WeightSet<S extends string = SignalName> extends ScoringModel<S> {
   ratingsUsed: number
   fittedShare: number
   createdAt: string
@@ -433,9 +465,9 @@ interface WeightSetRow {
   created_at: string
 }
 
-const toWeightSet = (r: WeightSetRow): WeightSet => ({
+const toWeightSet = <S extends string>(r: WeightSetRow): WeightSet<S> => ({
   version: r.version,
-  weights: JSON.parse(r.weights) as Weights,
+  weights: JSON.parse(r.weights) as Record<S, number>,
   cutoffs: JSON.parse(r.cutoffs) as TierCutoffs,
   ratingsUsed: r.ratings_used,
   fittedShare: r.fitted_share,
@@ -447,28 +479,30 @@ const toWeightSet = (r: WeightSetRow): WeightSet => ({
  * version they were fitted on; after a model change they no longer apply and
  * the starting weights take over until the next refit.
  */
-export function activeWeightSet(db: DatabaseSync, base: ScoringModel): WeightSet {
+export function activeWeightSet<S extends string = SignalName>(db: DatabaseSync, base: ScoringModel<S>): WeightSet<S> {
   const row = db
     .prepare(`select * from weight_sets where active = 1 and (version = ? or version like ? || '+w%')`)
     .get(base.version, base.version) as WeightSetRow | undefined
-  return row ? toWeightSet(row) : { ...base, ratingsUsed: 0, fittedShare: 0, createdAt: '' }
+  return row ? toWeightSet<S>(row) : { ...base, ratingsUsed: 0, fittedShare: 0, createdAt: '' }
 }
 
 /** Fitted sets for a model version, newest first. */
-export function fittedWeightSets(db: DatabaseSync, baseVersion: string): WeightSet[] {
+export function fittedWeightSets<S extends string = SignalName>(db: DatabaseSync, baseVersion: string): WeightSet<S>[] {
   const rows = db
     .prepare(`select * from weight_sets where version like ? || '+w%' order by created_at desc`)
     .all(baseVersion) as unknown as WeightSetRow[]
-  return rows.map(toWeightSet)
+  return rows.map((r) => toWeightSet<S>(r))
 }
 
-export function activateWeightSet(
+/** Make a set the active one for its league (the version prefix, nfl- or nba-). Other leagues' sets are untouched. */
+export function activateWeightSet<S extends string>(
   db: DatabaseSync,
-  set: WeightSet,
+  set: WeightSet<S>,
   holdout: { candidate: number; previous: number } | null,
 ): void {
+  const league = set.version.slice(0, set.version.indexOf('-') + 1)
   transaction(db, () => {
-    db.exec('update weight_sets set active = 0')
+    db.prepare(`update weight_sets set active = 0 where version like ? || '%'`).run(league)
     db.prepare(`
       insert into weight_sets (version, weights, cutoffs, ratings_used, fitted_share, holdout_new, holdout_prev, created_at, active)
       values (?, ?, ?, ?, ?, ?, ?, ?, 1)

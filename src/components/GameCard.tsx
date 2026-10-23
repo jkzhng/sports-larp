@@ -7,15 +7,6 @@ const kickoffFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', mon
 
 const TIER_CLASS = { 'Must watch': 'must', 'Worth it': 'worth', Skippable: 'skip' } as const
 
-function Stars({ count }: { count: number }) {
-  return (
-    <span className="stars" aria-label={`${count} out of 5 stars`}>
-      {'★'.repeat(count)}
-      <span className="stars-empty">{'★'.repeat(5 - count)}</span>
-    </span>
-  )
-}
-
 function WatchButton({ game, onWatch }: { game: Game; onWatch: (g: Game) => void }) {
   const h = game.highlights
   if (!h) return null
@@ -87,7 +78,6 @@ export function GameCard({ game, rank, watched, revealed, onWatch, onReveal, onR
           ))}
         </p>
         <div className="card-bottom">
-          {game.stars !== null ? <Stars count={game.stars} /> : <span />}
           <div className="card-actions">
             {watched && <span className="watched">✓ Watched</span>}
             {game.state !== 'upcoming' && !confirming && (

@@ -10,7 +10,7 @@ export interface KeyMoment {
 }
 
 export interface Recap {
-  overtime: boolean
+  overtime: number // overtime periods played: 0, 1 (OT), 2 (2OT), ...
   keyMoments: KeyMoment[]
   talkingPoints: string[]
   wp: [number, number][] // [elapsed game seconds, home WP]
@@ -138,7 +138,7 @@ export function buildRecap(plays: Play[], game: RecapGame): Recap {
   const biggest = candidates.find(({ p }) => biggestPlayPhrase(p) !== null)?.p ?? null
 
   return {
-    overtime: plays.some((p) => p.qtr !== null && p.qtr >= 5),
+    overtime: Math.max(0, ...plays.map((p) => (p.qtr ?? 0) - 4)),
     keyMoments,
     talkingPoints: talkingPoints(plays, game, biggest),
     wp,

@@ -137,7 +137,7 @@ export function buildNbaRecap(summary: Summary, home: string, away: string): Rec
     else wp.push(point)
   }
   return {
-    overtime: plays.some((p) => p.period > 4),
+    overtime: Math.max(0, ...plays.map((p) => p.period - 4)),
     keyMoments: keyMoments(plays, home, away),
     talkingPoints: talkingPoints(plays, boxPlayers(summary), home, away),
     wp,

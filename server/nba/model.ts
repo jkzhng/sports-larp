@@ -50,6 +50,8 @@ export const MIN_GAMES_FOR_PCT = 10
 export const RACE_MIN_GAMES = 55 // last ~27 games of an 82-game season
 export const RACE_MIN_WIN_PCT = 0.5
 export const REFERENCE_SEASON_COUNT = 3
+// Fitted weight sets recalibrate Must watch to this many regular-season games a week.
+export const MUST_WATCH_PER_WEEK = 2.5
 
 /** NBA season a date falls in, named by its start year: 2026-27 is 2026. */
 export function currentNbaSeason(now: Date): number {

@@ -173,7 +173,8 @@ export function parseScoreboard(sb: Scoreboard, night: string, season: number): 
   return out
 }
 
-async function pool<T, R>(items: T[], workers: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+/** Run `fn` over `items` with at most `workers` in flight, keeping input order. */
+export async function pool<T, R>(items: T[], workers: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length)
   let next = 0
   await Promise.all(

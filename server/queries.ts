@@ -43,9 +43,7 @@ const team = (league: string, abbr: string): TeamRef => {
 }
 
 const activeModel = (db: DatabaseSync) => activeWeightSet(db, DEFAULT_MODEL)
-
-// NBA weights aren't tuned from ratings yet; ratings are stored for when they are.
-const nbaModel = () => ({ version: NBA_MODEL.version, weights: NBA_MODEL.weights as Record<string, number>, ratingsUsed: 0 })
+const nbaModel = (db: DatabaseSync) => activeWeightSet(db, NBA_MODEL)
 
 function modelInfo(db: DatabaseSync, set: Pick<WeightSet, 'version' | 'ratingsUsed'>, league: League = 'NFL'): ModelInfo {
   const base = league === 'NBA' ? NBA_MODEL.version : DEFAULT_MODEL.version
@@ -129,7 +127,7 @@ export function listNights(db: DatabaseSync, season: number, now: Date): NightsR
        where g.league = 'NBA' and g.season = ? and g.night is not null
        group by g.night order by g.night`,
     )
-    .all(NBA_MODEL.version, season) as { night: string; game_type: string; games: number; ranked: number }[]
+    .all(nbaModel(db).version, season) as { night: string; game_type: string; games: number; ranked: number }[]
   const nights = rows.map((r) => ({ night: r.night, games: r.games, ranked: r.ranked, phase: NBA_PHASES[r.game_type] ?? r.game_type }))
   const today = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
   const lastRanked = nights.filter((n) => n.ranked > 0).at(-1)
@@ -139,7 +137,7 @@ export function listNights(db: DatabaseSync, season: number, now: Date): NightsR
     seasonLabel: `${season}-${String((season + 1) % 100).padStart(2, '0')}`,
     defaultNight: lastRanked?.night ?? next?.night ?? nights.at(-1)?.night ?? null,
     nights,
-    model: modelInfo(db, nbaModel(), 'NBA'),
+    model: modelInfo(db, nbaModel(db), 'NBA'),
   }
 }
 
@@ -161,7 +159,7 @@ const SIGNAL_LABELS: Record<SignalName | NbaSignal | 'big_moment', string> = {
 export function revealGame(db: DatabaseSync, gameId: string): RevealResponse | null {
   const league = (db.prepare('select league from games where id = ?').get(gameId) as { league: League } | undefined)?.league
   if (!league) return null
-  const model: { version: string; weights: Record<string, number>; ratingsUsed: number } = league === 'NBA' ? nbaModel() : activeModel(db)
+  const model: WeightSet<string> = league === 'NBA' ? nbaModel(db) : activeModel(db)
   const r = getRevealRow(db, gameId, model.version)
   if (!r) return null
   let why: RevealResponse['why'] = null
@@ -187,7 +185,7 @@ export function revealGame(db: DatabaseSync, gameId: string): RevealResponse | n
     id: r.id,
     away: { ...team(league, r.away_team), score: r.away_score },
     home: { ...team(league, r.home_team), score: r.home_score },
-    overtime: r.overtime === 1,
+    overtimes: r.overtime,
     talkingPoints: JSON.parse(r.talking_points) as string[],
     keyMoments: JSON.parse(r.key_moments) as KeyMoment[],
     winProbability: {
@@ -208,7 +206,6 @@ interface GameRow {
   status: string
   stakes_tags: string
   tier: Tier | null
-  stars: number | null
   video_id: string | null
   rating: number | null
 }
@@ -236,7 +233,6 @@ function toCards(rows: GameRow[], league: League, now: Date): GameCard[] {
       tags,
       state,
       tier: r.tier,
-      stars: r.stars,
       highlights,
       rating: r.rating,
     }
@@ -246,7 +242,7 @@ function toCards(rows: GameRow[], league: League, now: Date): GameCard[] {
 // `total` orders the list but is never returned.
 const GAME_ROWS = `
   select g.id, g.game_type, g.kickoff_at, g.home_team, g.away_team, g.status, g.stakes_tags,
-         w.tier, w.stars, h.video_id, r.stars as rating
+         w.tier, h.video_id, r.stars as rating
   from games g
   left join watch_scores w on w.game_id = g.id and w.model_version = ?
   left join highlight_videos h on h.game_id = g.id
@@ -264,7 +260,7 @@ export function listGames(db: DatabaseSync, season: number, week: number, now: D
 export function listNbaGames(db: DatabaseSync, night: string, now: Date): GamesResponse | null {
   const rows = db
     .prepare(`${GAME_ROWS} where g.league = 'NBA' and g.night = ? ${GAME_ORDER}`)
-    .all(NBA_MODEL.version, night) as unknown as GameRow[]
+    .all(nbaModel(db).version, night) as unknown as GameRow[]
   if (rows.length === 0) return null
   const season = (db.prepare("select season from games where league = 'NBA' and night = ? limit 1").get(night) as { season: number }).season
   return { league: 'NBA', season, week: null, night, label: nightLabel(night), games: toCards(rows, 'NBA', now) }
@@ -274,6 +270,6 @@ export function listNbaGames(db: DatabaseSync, night: string, now: Date): GamesR
 export function rateGame(db: DatabaseSync, gameId: string, stars: number, now: Date): boolean {
   const game = db.prepare("select league from games where id = ? and status = 'final'").get(gameId) as { league: League } | undefined
   if (!game) return false
-  upsertRating(db, gameId, stars, now.toISOString(), game.league === 'NBA' ? NBA_MODEL.version : activeModel(db).version)
+  upsertRating(db, gameId, stars, now.toISOString(), (game.league === 'NBA' ? nbaModel(db) : activeModel(db)).version)
   return true
 }

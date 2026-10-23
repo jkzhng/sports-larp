@@ -32,7 +32,7 @@ function fixture() {
 test('the list API never carries scores, winners or signal values', () => {
   const body = listGames(fixture(), 2026, 5, new Date('2026-10-13T12:00:00Z'))!
   const text = JSON.stringify(body)
-  for (const key of ['score', 'result', 'total', 'winner', 'pct', 'signals', 'raw', 'overtime']) {
+  for (const key of ['score', 'result', 'total', 'winner', 'pct', 'signals', 'raw', 'overtime', 'stars']) {
     assert.ok(!new RegExp(`"\\w*${key}\\w*"\\s*:`, 'i').test(text), `response has a "${key}" field`)
   }
   for (const value of ['37', '34', '31']) assert.ok(!text.includes(`:${value},`), `response contains final score ${value}`)

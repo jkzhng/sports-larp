@@ -27,8 +27,7 @@ export interface GameCard {
   home: TeamRef
   tags: string[] // pre-game context only: "Division rivalry", "ESPN", "West Finals · Game 3", ...
   state: 'ranked' | 'awaiting_data' | 'upcoming'
-  tier: Tier | null
-  stars: number | null
+  tier: Tier | null // the only hint of how good a game was; no stars or score within a tier
   highlights: Highlights | null // null until the game is final
   rating: number | null // the user's own 1-5 stars
 }
@@ -87,7 +86,7 @@ export interface RevealResponse {
   id: string
   away: TeamRef & { score: number }
   home: TeamRef & { score: number }
-  overtime: boolean
+  overtimes: number // overtime periods played: 0, 1 (OT), 2 (2OT), ...
   talkingPoints: string[]
   keyMoments: KeyMoment[]
   winProbability: {
@@ -105,4 +104,12 @@ export interface GamesResponse {
   night: string | null // NBA, YYYY-MM-DD
   label: string // Week 5, Wild Card, Tuesday, October 20
   games: GameCard[] // ranked games best first, then awaiting data, then upcoming by kickoff
+}
+
+// Data refresh from the UI's Update button. No log lines: they're not part of the spoiler-safe surface.
+export interface IngestStatus {
+  running: boolean
+  startedAt: string | null // the running pass, ISO UTC
+  lastFinishedAt: string | null // the last pass to finish, from any process
+  lastOk: boolean | null // false when a league failed; details are in the server log
 }

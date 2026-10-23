@@ -1,4 +1,4 @@
-import type { GamesResponse, NightsResponse, RevealResponse, WeeksResponse } from '../server/api-types.ts'
+import type { GamesResponse, IngestStatus, League, NightsResponse, RevealResponse, WeeksResponse } from '../server/api-types.ts'
 
 export type * from '../server/api-types.ts'
 
@@ -28,3 +28,16 @@ export async function postRating(gameId: string, stars: number): Promise<void> {
 
 // Spoilers: only call after the user explicitly reveals a game.
 export const fetchReveal = (gameId: string) => get<RevealResponse>(`/api/games/${encodeURIComponent(gameId)}/reveal`)
+
+export const fetchIngestStatus = () => get<IngestStatus>('/api/ingest')
+
+/** Starts an ingest pass for one league. Resolves with the status, also when a pass was already running. */
+export async function postIngest(league: League): Promise<IngestStatus> {
+  const res = await fetch('/api/ingest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ league: league.toLowerCase() }),
+  })
+  if (!res.ok && res.status !== 409) throw new Error(`${res.status} ${res.statusText}`)
+  return (await res.json()) as IngestStatus
+}

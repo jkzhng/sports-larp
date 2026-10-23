@@ -47,7 +47,7 @@ test('key moments are the biggest WP swings, in game order', () => {
     [3, '6:40', 0.3],
     [4, '1:00', 0.38],
   ])
-  assert.equal(r.overtime, false)
+  assert.equal(r.overtime, 0)
   assert.deepEqual(r.wp.at(0), [100, 0.5])
   assert.deepEqual(r.wp.at(-1), [3600, 0.98])
 })

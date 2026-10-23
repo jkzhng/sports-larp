@@ -2,7 +2,9 @@
 // finished games, scores and recaps, then highlight matching.
 import type { DatabaseSync } from 'node:sqlite'
 import {
+  activeWeightSet,
   getState,
+  hasScores,
   insertHighlights,
   nbaGamesNeedingHighlights,
   setState,
@@ -13,8 +15,9 @@ import {
 } from '../db.ts'
 import { HIGHLIGHT_LOOKBACK_MS } from '../highlights.ts'
 import type { Recap } from '../recap.ts'
-import { scoreGames, type RawSignals } from '../scoring/score.ts'
-import { easternDate, fetchNbaSchedule, fetchSummary, hasSummary, type NbaGame } from '../sources/espn.ts'
+import { NBA_REFIT, refitWeights } from '../refit.ts'
+import { scoreGames, type RawSignals, type ScoringModel } from '../scoring/score.ts'
+import { easternDate, fetchNbaSchedule, fetchSummary, hasSummary, pool, type NbaGame } from '../sources/espn.ts'
 import { fetchUploads, NBA_CHANNEL_ID } from '../sources/youtube.ts'
 import { matchNbaHighlights } from './highlights.ts'
 import { currentNbaSeason, NATIONAL_TV, NBA_MODEL, REFERENCE_SEASON_COUNT, type NbaSignal } from './model.ts'
@@ -57,7 +60,7 @@ export function nbaTags(g: NbaGame, s: NbaStakes): string[] {
 
 export async function runNbaIngest(
   db: DatabaseSync,
-  opts: { now?: Date; force?: boolean; log?: (msg: string) => void } = {},
+  opts: { now?: Date; force?: boolean; refit?: boolean; log?: (msg: string) => void } = {},
 ): Promise<NbaIngestResult> {
   const now = opts.now ?? new Date()
   const log = opts.log ?? console.log
@@ -77,7 +80,9 @@ export async function runNbaIngest(
   const missing = new Set<string>(JSON.parse(getState(db, MISSING_KEY) ?? '[]') as string[])
   const toFetch = final.filter((g) => !hasSummary(g.game_id) && !missing.has(g.game_id))
   let newSummaries = 0
-  for (const g of toFetch) {
+  let done = 0
+  // A fresh clone backfills ~4,000 games here; later passes fetch a handful.
+  await pool(toFetch, 6, async (g) => {
     try {
       const s = await fetchSummary(g.game_id)
       if (s) newSummaries++
@@ -85,22 +90,34 @@ export async function runNbaIngest(
     } catch (err) {
       log(`nba summary ${g.game_id} skipped: ${(err as Error).message}`)
     }
-  }
+    if (++done % 500 === 0) log(`nba summaries: ${done} of ${toFetch.length}`)
+  })
   if (toFetch.length > 0) log(`nba summaries: ${newSummaries} new of ${toFetch.length} needed`)
 
   // Scoring ----------------------------------------------------------------
   const stored = opts.force ? new Map<string, RawSignals<NbaSignal>>() : storedRawSignals<NbaSignal>(db, NBA_MODEL.version)
   const unscored = final.filter((g) => hasSummary(g.game_id) && !stored.has(g.game_id) && !missing.has(g.game_id))
+  const scoringCtx = { final, referenceSeasons, stakes, now, log }
   let count = 0
-  if (unscored.length === 0 && !opts.force) log('nba: no new games; scores unchanged')
-  else {
-    const result = await scoreNbaGames(db, { final, stored, referenceSeasons, stakes, now, log })
+  if (unscored.length === 0 && !opts.force && hasScores(db, activeWeightSet(db, NBA_MODEL).version)) {
+    log('nba: no new games; scores unchanged')
+  } else {
+    const result = await scoreNbaGames(db, { ...scoringCtx, stored })
     count = result.scored
     for (const g of final) {
       if (result.unusable.includes(g.game_id) && now.getTime() - Date.parse(g.tipoff) > MISSING_GIVE_UP_MS) missing.add(g.game_id)
     }
   }
   setState(db, MISSING_KEY, JSON.stringify([...missing]))
+
+  // Weights from ratings: needs the starting-weight scores above for percentiles.
+  const refit = refitWeights(db, now, { force: opts.refit, referenceSeasons, league: NBA_REFIT })
+  if (refit.status === 'adopted') {
+    const { set, holdout } = refit
+    log(`nba refit: adopted ${set.version} from ${set.ratingsUsed} ratings (holdout ${holdout.candidate.toFixed(2)} vs ${holdout.previous.toFixed(2)})`)
+    // Every game is scored by now, so this only re-ranks stored signals.
+    count = (await scoreNbaGames(db, { ...scoringCtx, stored: storedRawSignals<NbaSignal>(db, NBA_MODEL.version) })).scored
+  } else if (refit.status === 'kept' || opts.refit) log(`nba refit ${refit.status}: ${refit.reason}`)
 
   const highlightsMatched = await refreshNbaHighlights(db, now, log)
   return { season, scored: count, newSummaries, highlightsMatched, schedule }
@@ -167,11 +184,20 @@ async function scoreNbaGames(
     if (recap) recaps.set(g.game_id, recap)
   }
   if (reference.length === 0) throw new Error(`no NBA reference games for ${referenceSeasons.join(', ')}; cannot score`)
-  const scores = scoreGames(raw, reference, NBA_MODEL)
-  upsertScores(db, scores, now.toISOString())
+
+  // Always score with the starting weights (percentiles for refits, parity with
+  // the notebook), plus the active fitted set when there is one.
+  const active = activeWeightSet(db, NBA_MODEL)
+  const models: ScoringModel<NbaSignal>[] = active.version === NBA_MODEL.version ? [NBA_MODEL] : [NBA_MODEL, active]
+  let count = 0
+  for (const model of models) {
+    const scores = scoreGames(raw, reference, model)
+    upsertScores(db, scores, now.toISOString())
+    count = scores.length
+  }
   upsertRecaps(db, recaps, now.toISOString())
-  log(`nba: scored ${scores.length} games with ${NBA_MODEL.version} (${recaps.size} new; reference: ${reference.length} games)`)
-  return { scored: scores.length, unusable }
+  log(`nba: scored ${count} games with ${models.map((m) => m.version).join(' and ')} (${recaps.size} new; reference: ${reference.length} games)`)
+  return { scored: count, unusable }
 }
 
 async function refreshNbaHighlights(db: DatabaseSync, now: Date, log: (msg: string) => void): Promise<number> {
